@@ -1,0 +1,100 @@
+name: frappe
+
+x-app-defaults: &app-defaults
+  image: ${FRAPPE_IMAGE:-frappe-app:latest}
+  restart: unless-stopped
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+  ulimits:
+    nofile:
+      soft: 262144
+      hard: 262144
+  # Makes the host reachable as `host.docker.internal` from inside containers
+  # on Linux (Docker Desktop already provides this natively on macOS/Windows).
+  # Used to reach the DB stack on the same host without a shared docker network.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment: &app-env
+    FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-erp.example.com}
+    DB_HOST: ${DB_HOST:-host.docker.internal}
+    DB_PORT: ${DB_PORT:-3306}
+    REDIS_CACHE: redis-cache:6379
+    REDIS_QUEUE: redis-queue:6379
+    SOCKETIO_PORT: "9000"
+  depends_on:
+    redis-cache:
+      condition: service_started
+    redis-queue:
+      condition: service_started
+
+services:
+  backend:
+    <<: *app-defaults
+    command:
+      - /home/frappe/frappe-bench/env/bin/gunicorn
+      - --chdir=/home/frappe/frappe-bench/sites
+      - --bind=0.0.0.0:8000
+      - --workers=4
+      - --threads=4
+      - --worker-class=gthread
+      - --worker-tmp-dir=/dev/shm
+      - --timeout=180
+      - --max-requests=5000
+      - --max-requests-jitter=500
+      - --preload
+      - frappe.app:application
+
+  websocket:
+    <<: *app-defaults
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+
+  frontend:
+    <<: *app-defaults
+    command: /usr/local/bin/nginx-entrypoint.sh
+    environment:
+      <<: *app-env
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: "127.0.0.1"
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: "180"
+      CLIENT_MAX_BODY_SIZE: 50m
+    depends_on:
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
+    ports:
+      - "${HTTP_PUBLISH_PORT:-8080}:8080"
+
+  scheduler:
+    <<: *app-defaults
+    command: bench schedule
+
+  queue-short:
+    <<: *app-defaults
+    command: bench worker --queue short,default
+
+  queue-long:
+    <<: *app-defaults
+    command: bench worker --queue long,default,short
+
+  redis-cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-cache-data:/data
+
+  redis-queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+
+volumes:
+  sites:
+  logs:
+  redis-cache-data:
+  redis-queue-data:

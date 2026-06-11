@@ -1,0 +1,32 @@
+name: frappe-db
+
+services:
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    command:
+      - --skip-innodb-read-only-compressed
+      - --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-1G}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required}
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./config/mariadb/mariadb.cnf:/etc/mysql/conf.d/server.cnf:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      # Bind interface the DB is reachable on.
+      #   Single-host: 0.0.0.0 (app stack reaches it via host.docker.internal).
+      #     The host firewall MUST block 3306 from the public internet.
+      #   Multi-host:  bind to the private interface IP (Tailscale, VPC, etc).
+      - "${DB_PUBLISH_BIND:-0.0.0.0}:${DB_PUBLISH_PORT:-3306}:3306"
+
+volumes:
+  db-data:
