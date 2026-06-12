@@ -23,12 +23,33 @@ x-app-defaults: &app-defaults
     REDIS_QUEUE: redis-queue:6379
     SOCKETIO_PORT: "9000"
   depends_on:
+    configurator:
+      condition: service_completed_successfully
     redis-cache:
       condition: service_started
     redis-queue:
       condition: service_started
 
 services:
+  configurator:
+    <<: *app-defaults
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    restart: "no"
+    depends_on:
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+
   backend:
     <<: *app-defaults
     command:
