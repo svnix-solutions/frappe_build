@@ -77,7 +77,8 @@ services:
       <<: *app-env
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
-      UPSTREAM_REAL_IP_ADDRESS: "127.0.0.1"
+      # Trust X-Forwarded-* from Caddy on the shared docker network.
+      UPSTREAM_REAL_IP_ADDRESS: "172.16.0.0/12"
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "off"
       PROXY_READ_TIMEOUT: "180"
@@ -87,8 +88,14 @@ services:
         condition: service_started
       websocket:
         condition: service_started
-    ports:
-      - "${HTTP_PUBLISH_PORT:-8080}:8080"
+    networks:
+      - default
+      - caddy
+    labels:
+      caddy: ${PUBLIC_DOMAINS:?PUBLIC_DOMAINS is required (space-separated, e.g. \"erp.example.com www.erp.example.com\")}
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+      caddy.encode: gzip
+      caddy.header.Strict-Transport-Security: '"max-age=31536000;"'
 
   scheduler:
     <<: *app-defaults
@@ -119,3 +126,11 @@ volumes:
   logs:
   redis-cache-data:
   redis-queue-data:
+
+networks:
+  # Network shared with the caddy-docker-proxy stack so Caddy can reach the
+  # frontend container. Create it once on the host with:
+  #   docker network create caddy
+  caddy:
+    external: true
+    name: ${CADDY_NETWORK:-caddy}
