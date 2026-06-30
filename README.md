@@ -166,11 +166,10 @@ Deploy. On startup:
 Deploy. On startup:
 
 1. `redis-cache`, `redis-queue` start.
-2. `configurator` runs once, writes Redis/DB config into `sites/common_site_config.json`, exits 0.
-3. `backend`, `websocket`, `scheduler`, queues, `frontend` start.
-4. caddy-docker-proxy picks up the `frontend` container's labels and starts routing `PUBLIC_DOMAINS` to it with HTTPS.
+2. `backend`, `websocket`, `scheduler`, queues, `frontend` start.
+3. caddy-docker-proxy picks up the `frontend` container's labels and starts routing `PUBLIC_DOMAINS` to it with HTTPS.
 
-> The `configurator` container will show `Exited (0)` in `docker ps -a` — this is correct, not a failure. Dependent services wait on it via `service_completed_successfully`.
+> Redis/DB hostnames in `sites/common_site_config.json` are set manually after the first `bench new-site` (see §6). The auto-`configurator` service is shipped commented-out in `compose.yaml` — uncomment it (and the matching `depends_on` block) if you'd rather have it rewrite the config on every deploy.
 
 ### 5. Caddy Stack (one per host, shared by all app stacks)
 
@@ -209,11 +208,24 @@ Deploy as a separate Komodo Stack. It needs no env vars.
 
 ### 6. Create the ERPNext site (one-time)
 
-The Compose stack starts cleanly but the site doesn't exist yet. Create it manually:
+The Compose stack starts cleanly but the site doesn't exist yet, and `common_site_config.json` is empty until you write it. Do both manually:
 
 ```bash
 docker exec -it frappe-backend-1 bash
 ```
+
+First, point bench at the DB and Redis. These mirror what the (disabled) `configurator` service in `compose.yaml` would otherwise write on every deploy:
+
+```bash
+bench set-config  -g  db_host         "$DB_HOST"
+bench set-config  -gp db_port         "$DB_PORT"
+bench set-config  -g  redis_cache     "redis://redis-cache:6379"
+bench set-config  -g  redis_queue     "redis://redis-queue:6379"
+bench set-config  -g  redis_socketio  "redis://redis-queue:6379"
+bench set-config  -gp socketio_port   9000
+```
+
+Then create the site:
 
 ```bash
 bench new-site erp.example.com \
@@ -331,7 +343,7 @@ Once you've verified everything works, drop the old volume: `docker volume rm fr
 | Build fails: `frappe_lms ... node ">=22"` | Node 20 in build arg | Bump `NODE_VERSION` to 22+ |
 | Build fails: `Repository not found` mid `bench init` | Private repo in `apps.json` without auth | Embed PAT in the URL, pass `APPS_JSON_BASE64` as Komodo Secret Arg |
 | Build OOM-killed during `yarn install` | Builder host < 6 GB RAM | Use a bigger builder or trim apps |
-| `websocket` exits with `ECONNREFUSED 127.0.0.1:6379` | `common_site_config.json` empty | Configurator service didn't run — check its logs |
+| `websocket` exits with `ECONNREFUSED 127.0.0.1:6379` | `common_site_config.json` missing the Redis URLs | Run the `bench set-config` commands from §6, or enable the commented-out `configurator` service in `compose.yaml` |
 | `Access denied for user 'root'@'<ip>'` during `bench new-site` | Only `root@localhost` exists in MariaDB | Run the `CREATE USER 'root'@'%'` block from §2 |
 | Hitting Caddy → `no such site` | DNS not pointing at host, or `PUBLIC_DOMAINS` mismatch | Check DNS A record and verify the label was applied: `docker inspect frappe-frontend-1 | jq '.[0].Config.Labels'` |
 | Frontend logs Caddy's IP instead of real visitor IP | `UPSTREAM_REAL_IP_ADDRESS` too narrow | Already set to `172.16.0.0/12` in compose; ensure your docker network falls in that range |
