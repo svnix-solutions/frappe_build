@@ -4,7 +4,15 @@ x-app-defaults: &app-defaults
   image: ${FRAPPE_IMAGE:-frappe-app:latest}
   restart: unless-stopped
   volumes:
-    - sites:/home/frappe/frappe-bench/sites
+    # `sites` is bind-mounted from the JuiceFS host mount produced by the
+    # frappe-jfs stack (compose.jfs.yaml). rslave propagation makes the FUSE
+    # mount visible inside this container; if jfs is not up first, this path
+    # will be an empty dir and Frappe will fail loudly on startup.
+    - type: bind
+      source: ${JFS_HOST_MOUNT:-/mnt/jfs}/${JFS_NAME:-frappe-sites}
+      target: /home/frappe/frappe-bench/sites
+      bind:
+        propagation: rslave
     - logs:/home/frappe/frappe-bench/logs
   ulimits:
     nofile:
@@ -129,7 +137,6 @@ services:
       - redis-queue-data:/data
 
 volumes:
-  sites:
   logs:
   redis-cache-data:
   redis-queue-data:

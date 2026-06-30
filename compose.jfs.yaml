@@ -1,0 +1,126 @@
+name: frappe-jfs
+
+# JuiceFS stack: provides /mnt/jfs/frappe-sites on the host, which the app
+# stack (compose.yaml) bind-mounts into every Frappe container at
+# /home/frappe/frappe-bench/sites.
+#
+# Operator order:
+#   up:    frappe-db  →  frappe-jfs  →  frappe (app)
+#   down:  frappe (app)  →  frappe-jfs  →  frappe-db
+# Tearing this stack down while the app stack is running will leave the app
+# containers seeing EIO on every read/write to sites/.
+#
+# Metadata engine: dedicated Redis. Losing this DB = losing the filesystem
+# even though every chunk is still in the object store. AOF persistence with
+# everysec fsync is enabled below — back up jfs-meta-data *separately* from
+# the object bucket. This Redis is NOT shared with the app's redis-cache /
+# redis-queue (different durability requirements).
+
+services:
+  jfs-meta:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF on, fsync every second: crash window is <=1s of metadata writes.
+    # Use `appendfsync always` if you want zero loss at a perf cost.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --auto-aof-rewrite-percentage
+      - "100"
+      - --auto-aof-rewrite-min-size
+      - 64mb
+      - --requirepass
+      - ${JFS_META_PASSWORD:?JFS_META_PASSWORD is required}
+    volumes:
+      - jfs-meta-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${JFS_META_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: initialize the JuiceFS volume on first run. `juicefs format` is
+  # idempotent — re-running against an already-formatted volume is a no-op.
+  jfs-format:
+    image: juicedata/mount:ce-v1.2.1
+    restart: "no"
+    depends_on:
+      jfs-meta:
+        condition: service_healthy
+    environment:
+      JFS_NAME: ${JFS_NAME:-frappe-sites}
+      JFS_META_URL: redis://:${JFS_META_PASSWORD}@jfs-meta:6379/1
+      JFS_STORAGE: ${JFS_STORAGE:-s3}
+      JFS_BUCKET: ${JFS_BUCKET:?JFS_BUCKET is required (e.g. https://s3.amazonaws.com/my-bucket)}
+      JFS_ACCESS_KEY: ${JFS_ACCESS_KEY:?JFS_ACCESS_KEY is required}
+      JFS_SECRET_KEY: ${JFS_SECRET_KEY:?JFS_SECRET_KEY is required}
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        juicefs format
+        --storage "$$JFS_STORAGE"
+        --bucket "$$JFS_BUCKET"
+        --access-key "$$JFS_ACCESS_KEY"
+        --secret-key "$$JFS_SECRET_KEY"
+        "$$JFS_META_URL"
+        "$$JFS_NAME"
+
+  # FUSE mount sidecar. Mounts the JuiceFS volume at /mnt/jfs/<JFS_NAME>
+  # inside this container; mount propagation (rshared) carries it up to the
+  # host at ${JFS_HOST_MOUNT}/<JFS_NAME>. The app stack bind-mounts that host
+  # path with rslave so the mount flows into every Frappe container.
+  #
+  # Requires privileged + /dev/fuse + AppArmor exemption — Linux hosts only.
+  jfs:
+    image: juicedata/mount:ce-v1.2.1
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    depends_on:
+      jfs-format:
+        condition: service_completed_successfully
+    environment:
+      JFS_NAME: ${JFS_NAME:-frappe-sites}
+      JFS_META_URL: redis://:${JFS_META_PASSWORD}@jfs-meta:6379/1
+      # Local read cache. Size in MB. Sized to fit hot file uploads /
+      # frequently downloaded attachments. Larger = fewer object-store round
+      # trips, more local disk used.
+      JFS_CACHE_SIZE: ${JFS_CACHE_SIZE:-10240}
+    volumes:
+      # rshared makes the FUSE mount propagate out to the host, so other
+      # compose projects can see it.
+      - type: bind
+        source: ${JFS_HOST_MOUNT:-/mnt/jfs}
+        target: /mnt/jfs
+        bind:
+          propagation: rshared
+      - jfs-cache:/var/jfsCache
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        mkdir -p "/mnt/jfs/$$JFS_NAME" &&
+        exec juicefs mount
+        --cache-dir /var/jfsCache
+        --cache-size "$$JFS_CACHE_SIZE"
+        --writeback
+        --no-usage-report
+        "$$JFS_META_URL"
+        "/mnt/jfs/$$JFS_NAME"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mountpoint -q "/mnt/jfs/${JFS_NAME:-frappe-sites}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  jfs-meta-data:
+  jfs-cache:

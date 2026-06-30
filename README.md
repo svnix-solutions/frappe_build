@@ -2,13 +2,14 @@
 
 Container image + Docker Compose stacks for self-hosted Frappe / ERPNext, designed to be deployed via [Komodo](https://komo.do/).
 
-The repo is split into three independent Compose stacks so each can run on its own host (or all on one box):
+The repo is split into independent Compose stacks so each can run on its own host (or all on one box):
 
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Builds the Frappe bench image with all apps from `apps.json` baked in. Published to a container registry. |
 | `compose.db.yaml` | MariaDB stack. Standalone — can live on its own server. |
-| `compose.yaml` | Application stack: backend, websocket, workers, scheduler, redis, frontend (nginx). Pulls the image built from the Dockerfile. |
+| `compose.jfs.yaml` | JuiceFS stack. Provides the host mount that backs Frappe's `sites/` (chunks in object storage, metadata in a dedicated Redis). Must be up before the app stack. |
+| `compose.yaml` | Application stack: backend, websocket, workers, scheduler, redis, frontend (nginx). Pulls the image built from the Dockerfile. Bind-mounts `sites/` from the JuiceFS host mount. |
 
 Ingress (TLS + domain routing) is delegated to an external [caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy) stack via container labels.
 
@@ -21,6 +22,7 @@ Ingress (TLS + domain routing) is delegated to an external [caddy-docker-proxy](
 ├── Dockerfile              # Frappe bench image with apps baked in
 ├── apps.json               # List of apps + branches to include in the build
 ├── compose.db.yaml         # MariaDB stack
+├── compose.jfs.yaml        # JuiceFS stack (object-store-backed sites/ volume)
 ├── compose.yaml            # App stack (backend, workers, frontend, redis)
 ├── .env.example            # All env vars consumed by both stacks
 └── config/
@@ -110,7 +112,36 @@ GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 ```
 
-### 3. App Stack
+### 3. JuiceFS Stack
+
+The app stack bind-mounts `sites/` from a JuiceFS host mount produced by this stack — bring it up **before** `frappe-app`, or the app containers will start against an empty directory and fail loudly.
+
+**Stacks → + New** → `frappe-jfs`:
+
+- **Source**: this repo, `File Paths=compose.jfs.yaml`, `Run Directory=.`
+- **Host requirements**: Linux with FUSE available. `privileged: true` + `/dev/fuse` + AppArmor exemption are required for the mount sidecar — won't run on Docker Desktop.
+- **Environment**:
+  ```env
+  JFS_HOST_MOUNT=/mnt/jfs            # also read by frappe-app — keep them in sync
+  JFS_NAME=frappe-sites
+  JFS_META_PASSWORD=[[FRAPPE_JFS_META_PASSWORD]]
+  JFS_CACHE_SIZE=10240               # MB of local read cache
+
+  JFS_STORAGE=s3
+  JFS_BUCKET=https://s3.us-east-1.amazonaws.com/your-bucket
+  JFS_ACCESS_KEY=[[FRAPPE_JFS_ACCESS_KEY]]
+  JFS_SECRET_KEY=[[FRAPPE_JFS_SECRET_KEY]]
+  ```
+
+Deploy. On startup:
+
+1. `jfs-meta` (Redis with AOF persistence) starts.
+2. `jfs-format` runs `juicefs format` once against the metadata DB + bucket, exits 0. Idempotent — safe on every deploy.
+3. `jfs` mounts the FUSE filesystem at `${JFS_HOST_MOUNT}/${JFS_NAME}` and stays running.
+
+> **Critical**: the `jfs-meta` Redis is the filesystem index. If you lose its volume, the JuiceFS volume is unrecoverable even though every chunk is still in the bucket. Back up the `jfs-meta-data` volume on its own schedule, separate from the object bucket. Don't reuse the app's `redis-cache` or `redis-queue` for this.
+
+### 4. App Stack
 
 **Stacks → + New** → `frappe-app`:
 
@@ -126,6 +157,10 @@ FLUSH PRIVILEGES;
   DB_HOST=host.docker.internal     # same-host DB
   # DB_HOST=10.0.0.5               # multi-host: private IP of DB box
   DB_PORT=3306
+
+  # Must match the JFS stack — these resolve the bind-mount source path.
+  JFS_HOST_MOUNT=/mnt/jfs
+  JFS_NAME=frappe-sites
   ```
 
 Deploy. On startup:
@@ -137,7 +172,7 @@ Deploy. On startup:
 
 > The `configurator` container will show `Exited (0)` in `docker ps -a` — this is correct, not a failure. Dependent services wait on it via `service_completed_successfully`.
 
-### 4. Caddy Stack (one per host, shared by all app stacks)
+### 5. Caddy Stack (one per host, shared by all app stacks)
 
 Minimal `compose.caddy.yaml`:
 
@@ -172,7 +207,7 @@ networks:
 
 Deploy as a separate Komodo Stack. It needs no env vars.
 
-### 5. Create the ERPNext site (one-time)
+### 6. Create the ERPNext site (one-time)
 
 The Compose stack starts cleanly but the site doesn't exist yet. Create it manually:
 
@@ -225,6 +260,8 @@ All variables live in `.env` (or in Komodo's Stack environment block — see [`.
 | `CADDY_NETWORK` | | `caddy` | External docker network name |
 | `DB_HOST` | ✅ | `host.docker.internal` | DB hostname/IP |
 | `DB_PORT` | | `3306` | DB port |
+| `JFS_HOST_MOUNT` | | `/mnt/jfs` | Host path where the JFS stack exposes the mount |
+| `JFS_NAME` | | `frappe-sites` | JuiceFS volume name (sub-dir under `JFS_HOST_MOUNT`) |
 
 ### DB stack (`compose.db.yaml`)
 
@@ -234,6 +271,43 @@ All variables live in `.env` (or in Komodo's Stack environment block — see [`.
 | `INNODB_BUFFER_POOL_SIZE` | | `1G` | InnoDB cache size |
 | `DB_PUBLISH_BIND` | | `0.0.0.0` | Interface MariaDB binds on |
 | `DB_PUBLISH_PORT` | | `3306` | Host port |
+
+### JuiceFS stack (`compose.jfs.yaml`)
+
+| Variable | Required | Default | Purpose |
+|---|:-:|---|---|
+| `JFS_HOST_MOUNT` | | `/mnt/jfs` | Host path the FUSE mount propagates to |
+| `JFS_NAME` | | `frappe-sites` | JuiceFS volume name |
+| `JFS_META_PASSWORD` | ✅ | — | Password for the metadata Redis |
+| `JFS_CACHE_SIZE` | | `10240` | Local read cache in MB |
+| `JFS_STORAGE` | | `s3` | JuiceFS storage backend type |
+| `JFS_BUCKET` | ✅ | — | Full bucket endpoint URL |
+| `JFS_ACCESS_KEY` | ✅ | — | Object store access key |
+| `JFS_SECRET_KEY` | ✅ | — | Object store secret key |
+
+---
+
+## Migrating an existing `sites` named volume to JuiceFS
+
+If you were previously running with the old named-volume layout, the bind-mount swap won't carry your data over. One-time copy with the app stack stopped:
+
+```bash
+docker compose -f compose.yaml down
+
+# Bring JFS up first so /mnt/jfs/frappe-sites exists
+docker compose -f compose.jfs.yaml up -d
+
+# Copy the old volume into the JuiceFS mount. Volume name is `<project>_sites`
+# — check `docker volume ls` for the exact name.
+docker run --rm \
+  -v frappe_sites:/from \
+  -v /mnt/jfs/frappe-sites:/to \
+  alpine cp -a /from/. /to/
+
+docker compose -f compose.yaml up -d
+```
+
+Once you've verified everything works, drop the old volume: `docker volume rm frappe_sites`.
 
 ---
 
@@ -261,6 +335,9 @@ All variables live in `.env` (or in Komodo's Stack environment block — see [`.
 | `Access denied for user 'root'@'<ip>'` during `bench new-site` | Only `root@localhost` exists in MariaDB | Run the `CREATE USER 'root'@'%'` block from §2 |
 | Hitting Caddy → `no such site` | DNS not pointing at host, or `PUBLIC_DOMAINS` mismatch | Check DNS A record and verify the label was applied: `docker inspect frappe-frontend-1 | jq '.[0].Config.Labels'` |
 | Frontend logs Caddy's IP instead of real visitor IP | `UPSTREAM_REAL_IP_ADDRESS` too narrow | Already set to `172.16.0.0/12` in compose; ensure your docker network falls in that range |
+| App containers exit immediately, logs show `sites/common_site_config.json` missing | App stack started before JFS mount was ready (empty bind-mount dir) | Bring `frappe-jfs` up first; verify `mountpoint -q /mnt/jfs/frappe-sites` on the host before starting app |
+| All app containers show `Input/output error` reading `sites/` mid-run | `jfs` sidecar restarted, FUSE mount dropped | Restart the app stack so the bind-mount picks up the new FUSE handle. Investigate why `jfs` flapped (OOM, image pull, meta DB unreachable) |
+| `juicefs format` fails with `access denied` or `NoSuchBucket` | Bucket doesn't exist or keys are wrong | Create the bucket first; verify `JFS_BUCKET` includes the full endpoint URL (not just bucket name) |
 
 ### Useful commands
 
