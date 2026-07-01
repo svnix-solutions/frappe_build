@@ -52,8 +52,13 @@ services:
     <<: *app-defaults
     entrypoint: ["bash", "-c"]
     command:
+      # `bench set-config` reads sites/common_site_config.json before rewriting
+      # it and fails with FileNotFoundError on a fresh sites/ volume (JuiceFS
+      # first boot). Seed an empty JSON so the first set-config has something
+      # to open. No-op on every subsequent deploy.
       - >
         ls -1 apps > sites/apps.txt;
+        [ -f sites/common_site_config.json ] || echo '{}' > sites/common_site_config.json;
         bench set-config -g db_host $$DB_HOST;
         bench set-config -gp db_port $$DB_PORT;
         bench set-config -g redis_cache "redis://$$REDIS_CACHE";
