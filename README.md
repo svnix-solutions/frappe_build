@@ -139,6 +139,8 @@ Deploy. On startup:
 2. `jfs-format` runs `juicefs format` once against the metadata DB + bucket, exits 0. Idempotent — safe on every deploy.
 3. `jfs` mounts the FUSE filesystem at `${JFS_HOST_MOUNT}/${JFS_NAME}` and stays running.
 
+> In Komodo, add `jfs-format` to the `frappe-jfs` Stack resource's **`ignore_services`** list. It's a one-shot init container that exits 0 by design; without ignoring it, Komodo marks the whole stack Unhealthy because "containers are in a mix of states."
+
 > **Critical**: the `jfs-meta` Redis is the filesystem index. If you lose its volume, the JuiceFS volume is unrecoverable even though every chunk is still in the bucket. Back up the `jfs-meta-data` volume on its own schedule, separate from the object bucket. Don't reuse the app's `redis-cache` or `redis-queue` for this.
 
 ### 4. App Stack

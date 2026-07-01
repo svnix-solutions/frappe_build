@@ -44,6 +44,12 @@ services:
 
   # One-shot: initialize the JuiceFS volume on first run. `juicefs format` is
   # idempotent — re-running against an already-formatted volume is a no-op.
+  # Exits 0 and stays exited (restart: "no") — this is intentional.
+  #
+  # Komodo will otherwise flag the whole stack Unhealthy because "the
+  # containers are in a mix of states" (this one exited, jfs-meta + jfs
+  # running). Add `jfs-format` to the Stack resource's `ignore_services`
+  # list in Komodo so its exit is excluded from stack-state accounting.
   jfs-format:
     image: juicedata/mount:ce-v1.2.1
     restart: "no"
