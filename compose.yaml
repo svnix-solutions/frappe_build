@@ -31,10 +31,8 @@ x-app-defaults: &app-defaults
     REDIS_QUEUE: redis-queue:6379
     SOCKETIO_PORT: "9000"
   depends_on:
-    # Re-enable when using the configurator service below to wait for it
-    # to populate sites/common_site_config.json before app services start.
-    # configurator:
-    #   condition: service_completed_successfully
+    configurator:
+      condition: service_completed_successfully
     redis-cache:
       condition: service_started
     redis-queue:
@@ -42,28 +40,32 @@ x-app-defaults: &app-defaults
 
 services:
   # One-shot init that writes Redis URLs, DB host/port, and socketio_port into
-  # sites/common_site_config.json. Disabled — we configure these manually after
-  # `bench new-site`. Re-enable by uncommenting this service AND the
-  # `configurator` entry in the `depends_on` block above.
+  # sites/common_site_config.json. Runs before every app service starts (via
+  # depends_on: service_completed_successfully in x-app-defaults) so the shared
+  # config file is always current when workers/frontend come up.
   #
-  # configurator:
-  #   <<: *app-defaults
-  #   entrypoint: ["bash", "-c"]
-  #   command:
-  #     - >
-  #       ls -1 apps > sites/apps.txt;
-  #       bench set-config -g db_host $$DB_HOST;
-  #       bench set-config -gp db_port $$DB_PORT;
-  #       bench set-config -g redis_cache "redis://$$REDIS_CACHE";
-  #       bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
-  #       bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
-  #       bench set-config -gp socketio_port $$SOCKETIO_PORT;
-  #   restart: "no"
-  #   depends_on:
-  #     redis-cache:
-  #       condition: service_started
-  #     redis-queue:
-  #       condition: service_started
+  # This is a one-shot: exits 0 after writing config. In Komodo, add
+  # `configurator` to the frappe-app Stack resource's `ignore_services` list
+  # so its clean exit isn't counted against stack health (same treatment as
+  # `jfs-format` in the frappe-jfs stack).
+  configurator:
+    <<: *app-defaults
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    restart: "no"
+    depends_on:
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
 
   backend:
     <<: *app-defaults

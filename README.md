@@ -168,10 +168,11 @@ Deploy. On startup:
 Deploy. On startup:
 
 1. `redis-cache`, `redis-queue` start.
-2. `backend`, `websocket`, `scheduler`, queues, `frontend` start.
-3. caddy-docker-proxy picks up the `frontend` container's labels and starts routing `PUBLIC_DOMAINS` to it with HTTPS.
+2. `configurator` runs once, writing DB host/port, Redis URLs, and socketio_port into `sites/common_site_config.json`, then exits 0.
+3. `backend`, `websocket`, `scheduler`, queues, `frontend` start (they all wait on `configurator: service_completed_successfully`).
+4. caddy-docker-proxy picks up the `frontend` container's labels and starts routing `PUBLIC_DOMAINS` to it with HTTPS.
 
-> Redis/DB hostnames in `sites/common_site_config.json` are set manually after the first `bench new-site` (see §6). The auto-`configurator` service is shipped commented-out in `compose.yaml` — uncomment it (and the matching `depends_on` block) if you'd rather have it rewrite the config on every deploy.
+> In Komodo, add `configurator` to the `frappe-app` Stack resource's **`ignore_services`** list so its clean exit doesn't flip the stack to Unhealthy. Same treatment as `jfs-format` in the frappe-jfs stack.
 
 ### 5. Caddy Stack (one per host, shared by all app stacks)
 
@@ -216,7 +217,7 @@ The Compose stack starts cleanly but the site doesn't exist yet, and `common_sit
 docker exec -it frappe-backend-1 bash
 ```
 
-First, point bench at the DB and Redis. These mirror what the (disabled) `configurator` service in `compose.yaml` would otherwise write on every deploy:
+The `configurator` service already wrote DB host/port, Redis URLs, and socketio_port into `sites/common_site_config.json` on stack start. You only need to re-run these `bench set-config` commands if you're overriding what it wrote, or if you disabled the configurator:
 
 ```bash
 bench set-config  -g  db_host         "$DB_HOST"
@@ -345,7 +346,7 @@ Once you've verified everything works, drop the old volume: `docker volume rm fr
 | Build fails: `frappe_lms ... node ">=22"` | Node 20 in build arg | Bump `NODE_VERSION` to 22+ |
 | Build fails: `Repository not found` mid `bench init` | Private repo in `apps.json` without auth | Embed PAT in the URL, pass `APPS_JSON_BASE64` as Komodo Secret Arg |
 | Build OOM-killed during `yarn install` | Builder host < 6 GB RAM | Use a bigger builder or trim apps |
-| `websocket` exits with `ECONNREFUSED 127.0.0.1:6379` | `common_site_config.json` missing the Redis URLs | Run the `bench set-config` commands from §6, or enable the commented-out `configurator` service in `compose.yaml` |
+| `websocket` exits with `ECONNREFUSED 127.0.0.1:6379` | `common_site_config.json` missing the Redis URLs | The `configurator` service should have written these — check its logs (`docker compose logs configurator`). If it failed, fix and re-run; as a manual fallback, run the `bench set-config` commands from §6 |
 | `Access denied for user 'root'@'<ip>'` during `bench new-site` | Only `root@localhost` exists in MariaDB | Run the `CREATE USER 'root'@'%'` block from §2 |
 | Hitting Caddy → `no such site` | DNS not pointing at host, or `PUBLIC_DOMAINS` mismatch | Check DNS A record and verify the label was applied: `docker inspect frappe-frontend-1 | jq '.[0].Config.Labels'` |
 | Frontend logs Caddy's IP instead of real visitor IP | `UPSTREAM_REAL_IP_ADDRESS` too narrow | Already set to `172.16.0.0/12` in compose; ensure your docker network falls in that range |
