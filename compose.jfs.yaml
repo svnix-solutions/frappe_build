@@ -98,6 +98,12 @@ services:
       # frequently downloaded attachments. Larger = fewer object-store round
       # trips, more local disk used.
       JFS_CACHE_SIZE: ${JFS_CACHE_SIZE:-10240}
+      # UID/GID the FUSE mount root is chown'd to once mounted. Matches the
+      # `frappe` user in the app image (see Dockerfile: useradd -ms /bin/bash
+      # frappe, which lands on 1000:1000 on Debian). If you rebuild the app
+      # image with a different UID, override these.
+      JFS_OWNER_UID: ${JFS_OWNER_UID:-1000}
+      JFS_OWNER_GID: ${JFS_OWNER_GID:-1000}
     volumes:
       # rshared makes the FUSE mount propagate out to the host, so other
       # compose projects can see it.
@@ -108,9 +114,18 @@ services:
           propagation: rshared
       - jfs-cache:/var/jfsCache
     entrypoint: ["sh", "-c"]
+    # Background subshell waits for the FUSE mount, then chowns the root inode
+    # to the frappe UID/GID. JuiceFS stores this ownership in the meta Redis
+    # so it's persistent — after the first successful chown, subsequent runs
+    # are no-ops. Runs alongside `exec juicefs mount` so juicefs stays PID 1
+    # and SIGTERM from `docker stop` unmounts cleanly.
     command:
       - >
         mkdir -p "/mnt/jfs/$$JFS_NAME" &&
+        (
+          until mountpoint -q "/mnt/jfs/$$JFS_NAME"; do sleep 1; done;
+          chown "$$JFS_OWNER_UID:$$JFS_OWNER_GID" "/mnt/jfs/$$JFS_NAME"
+        ) &
         exec juicefs mount
         --cache-dir /var/jfsCache
         --cache-size "$$JFS_CACHE_SIZE"
