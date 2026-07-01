@@ -131,6 +131,12 @@ RUN export APP_INSTALL_ARGS="" && \
     --verbose \
     /home/frappe/frappe-bench && \
   cd /home/frappe/frappe-bench && \
+  # `razorpay` (pulled in by the payments app) does `import pkg_resources` at
+  # module load. pkg_resources ships with setuptools, which is NOT installed
+  # in Python 3.11+ slim venvs by default and razorpay's metadata doesn't
+  # declare it as a runtime dep. Without this, `install-app payments` blows
+  # up mid-DocType-sync on Razorpay Settings. Upstream bug in razorpay-python.
+  env/bin/pip install --no-cache-dir setuptools && \
   echo "{}" > sites/common_site_config.json && \
   find apps -mindepth 1 -path "*/.git" | xargs rm -fr
 
