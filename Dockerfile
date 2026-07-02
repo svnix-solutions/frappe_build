@@ -112,27 +112,18 @@ RUN apt-get update \
     libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# apps.json includes
+ARG APPS_JSON_BASE64
+RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
+    mkdir /opt/frappe && echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; \
+  fi
+
 USER frappe
 
 ARG FRAPPE_BRANCH=version-15
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
-
-# apps.json is passed as a BuildKit secret, not a build arg. The file only
-# exists inside this single RUN — nothing lands in `docker history`, no
-# base64 in image metadata, no leak of GitHub PATs embedded in private-repo
-# URLs. Requires DOCKER_BUILDKIT=1 (default on modern Docker) and the caller
-# to pass `--secret id=apps_json,src=./apps.json`. Omit the secret and the
-# build falls through to a vanilla Frappe install (no ERPNext, HRMS, etc.).
-#
-# CACHE_BUST lets the caller force `bench init` to re-run without having to
-# --no-cache the entire build — pass a changing value (e.g. commit SHA of a
-# private app repo) when you need to pick up new upstream commits but the
-# Dockerfile itself is unchanged.
-ARG CACHE_BUST=""
-RUN --mount=type=secret,id=apps_json,target=/opt/frappe/apps.json,uid=1000,gid=1000 \
-  : "${CACHE_BUST}" && \
-  export APP_INSTALL_ARGS="" && \
-  if [ -f /opt/frappe/apps.json ] && [ -s /opt/frappe/apps.json ]; then \
+RUN export APP_INSTALL_ARGS="" && \
+  if [ -n "${APPS_JSON_BASE64}" ]; then \
     export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json"; \
   fi && \
   bench init ${APP_INSTALL_ARGS}\

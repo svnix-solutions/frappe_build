@@ -45,7 +45,7 @@ Listed in [`apps.json`](apps.json). Currently:
 - **UX**: chat, desk-navbar-extended
 - **Tenant-specific**: fuelbuddy_dubai
 
-To add or remove apps, edit `apps.json` and rebuild the image. `apps.json` is passed to the build as a **BuildKit secret**, not a build arg — see [Building the image](#building-the-image) below.
+To add or remove apps, edit `apps.json` and rebuild the image. The build pulls these as a base64-encoded `APPS_JSON_BASE64` build arg (see below).
 
 ---
 
@@ -64,31 +64,17 @@ The image is built by [Komodo's Build resource](https://komo.do/docs/build), pus
 | `WKHTMLTOPDF_DISTRO` | `bookworm` | |
 | `FRAPPE_BRANCH` | `version-15` | |
 | `FRAPPE_PATH` | `https://github.com/frappe/frappe` | |
-| `CACHE_BUST` | *(empty)* | Change this (e.g. commit SHA of a private app repo) to force `bench init` to re-run without invalidating earlier layers. Leave empty for normal builds. |
+| `APPS_JSON_BASE64` | *(see below)* | base64 of `apps.json` |
 
-### Build secret: `apps.json`
-
-`apps.json` is passed as a **BuildKit secret**, not a build arg. The file is mounted only during the `bench init` step and never lands in `docker history`, image metadata, or the build cache — so any GitHub PATs embedded in private-repo URLs stay in the file. Requires BuildKit (default on Docker 23+).
-
-Local build:
+### Generating `APPS_JSON_BASE64`
 
 ```bash
-DOCKER_BUILDKIT=1 docker build \
-  --secret id=apps_json,src=./apps.json \
-  --target backend \
-  -t frappe-app:latest \
-  .
+base64 -i apps.json | tr -d '\n'
 ```
 
-Komodo build: set **Use Buildx** on (default in modern Komodo) and add the secret under the Build's **Secrets** / **Extra Args** field:
+Paste the single-line output as the build arg value. Without it, the image only contains a vanilla Frappe install (no ERPNext, HRMS, etc.).
 
-```
---secret id=apps_json,src=./apps.json
-```
-
-Omit the secret entirely and the build falls through to a vanilla Frappe install (no ERPNext, HRMS, etc.) — useful for smoke-testing the base image.
-
-**Private repos:** commit `apps.json` with URLs like `https://${GITHUB_TOKEN}@github.com/org/private-app`, and materialize the token in a build-step script that writes the resolved file to disk before `docker build --secret id=apps_json,src=./apps.json.resolved`. The resolved file never enters git or the image.
+If any URL in `apps.json` points to a **private repo**, embed a GitHub Personal Access Token in the URL and pass `APPS_JSON_BASE64` as a **Secret Arg** in Komodo so the token doesn't leak into build logs.
 
 ---
 
@@ -103,7 +89,7 @@ docker network create caddy
 
 ### 1. Build Stack
 
-In Komodo: **Builds → + New**, set source = this repo, Dockerfile path = `Dockerfile`, target = `backend`, and the build args above. Add `--secret id=apps_json,src=./apps.json` to the Build's Extra Args so `apps.json` gets mounted as a BuildKit secret (see [Build secret: apps.json](#build-secret-appsjson)). Push to your registry.
+In Komodo: **Builds → + New**, set source = this repo, Dockerfile path = `Dockerfile`, target = `backend`, and the build args above. Push to your registry.
 
 ### 2. Database Stack
 
@@ -361,7 +347,7 @@ Once you've verified everything works, drop the old volume: `docker volume rm fr
 | Symptom | Cause | Fix |
 |---|---|---|
 | Build fails: `frappe_lms ... node ">=22"` | Node 20 in build arg | Bump `NODE_VERSION` to 22+ |
-| Build fails: `Repository not found` mid `bench init` | Private repo in `apps.json` without auth | Embed PAT in the URL and pass `apps.json` via `--secret id=apps_json,src=./apps.json` (see [Build secret: apps.json](#build-secret-appsjson)). The PAT never enters the image. |
+| Build fails: `Repository not found` mid `bench init` | Private repo in `apps.json` without auth | Embed PAT in the URL, pass `APPS_JSON_BASE64` as Komodo Secret Arg |
 | Build OOM-killed during `yarn install` | Builder host < 6 GB RAM | Use a bigger builder or trim apps |
 | `websocket` exits with `ECONNREFUSED 127.0.0.1:6379` | `common_site_config.json` missing the Redis URLs | The `configurator` service should have written these — check its logs (`docker compose logs configurator`). If it failed, fix and re-run; as a manual fallback, run the `bench set-config` commands from §6 |
 | `Access denied for user 'root'@'<ip>'` during `bench new-site` | Only `root@localhost` exists in MariaDB | Run the `CREATE USER 'root'@'%'` block from §2 |
